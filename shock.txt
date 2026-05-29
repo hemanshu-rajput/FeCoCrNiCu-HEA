@@ -1,0 +1,235 @@
+# Shock simulation script for GB_43.6 at 1.25 km/s
+
+# ------------------------ INITIALIZATION ----------------------------
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+
+read_data       GB_43_100.dat
+
+# ---------------Sequential Substitute---------------
+
+variable fFe equal 20.0
+variable fNi equal 20.0
+variable fCr equal 20.0
+variable fCo equal 20.0
+variable fCu equal 20.0
+
+# Precompute fractions (must be done with LAMMPS math syntax)
+variable frac2 equal (v_fNi+v_fCr+v_fCo+v_fCu)/100.0
+variable frac3 equal (v_fCr+v_fCo+v_fCu)/(100.0-v_fFe)
+variable frac4 equal (v_fCo+v_fCu)/(100.0-v_fFe-v_fNi)
+variable frac5 equal (v_fCu)/(100.0-v_fFe-v_fNi-v_fCr)
+
+print "frac2=${frac2} frac3=${frac3} frac4=${frac4} frac5=${frac5}"
+
+
+# Substitute with those evaluated variables
+set type 1 type/fraction 2 $((v_fNi+v_fCr+v_fCo+v_fCu)/100.0) 7387364
+set type 2 type/fraction 3 $((v_fCr+v_fCo+v_fCu)/(100.0-v_fFe)) 2413252
+set type 3 type/fraction 4 $((v_fCo+v_fCu)/(100.0-v_fFe-v_fNi)) 4234234
+set type 4 type/fraction 5 $(v_fCu/(100.0-v_fFe-v_fNi-v_fCr)) 2344234
+
+group Fe type 1
+group Ni type 2
+group Cr type 3
+group Co type 4
+group Cu type 5
+
+variable nNi equal count(Ni)
+variable nFe equal count(Fe)
+variable nCr equal count(Cr)
+variable nCo equal count(Co)
+variable nCu equal count(Cu)
+variable ntot equal count(all)
+
+print "Ni = ${nNi}, Cr = ${nCr}, Co = ${nCo}, Fe = ${nFe}, Cu = ${nCu}, Total = ${ntot}" screen yes
+
+# ------------------------ FORCE FIELDS ------------------------------
+
+
+pair_style	eam/alloy
+pair_coeff	* * FeNiCrCoCu-heafixed.txt Fe Ni Cr Co Cu
+
+neighbor 2.0 bin
+neigh_modify delay 10 check yes
+
+
+################################### Define Settings ################################################
+compute csym all centro/atom fcc
+compute eng all pe/atom
+compute eatoms all reduce sum c_eng
+
+compute disp all displace/atom
+compute mytemp all temp
+#variable temperature atom c_mytemp
+compute mytemp1 all temp/com
+compute           peratom all  pe/atom
+compute           pe all reduce ave c_peratom
+compute		  ke all ke/atom
+compute           ke1 all reduce ave c_ke
+compute myCOM all com
+compute velZ all property/atom vz
+compute vorvol all voronoi/atom
+compute           strs all stress/atom NULL virial
+compute	          pr all reduce sum c_strs[1] c_strs[2] c_strs[3]
+compute press all reduce sum c_strs[3]
+compute peatom all pe/atom
+
+
+
+#################################### Run Minimization ##########################################################
+
+reset_timestep 0
+thermo 500
+thermo_style custom step  lx ly lz press pxx pyy pzz vol pe c_eatoms 
+dump 		1 all cfg 1000 dump.sig5_minimization_*.cfg mass type xs ys zs c_csym c_eng fx fy fz 
+dump_modify     1 element Fe Ni Cr Co Cu
+
+min_style cg
+minimize 1e-6 1e-6 15000 15000
+
+undump 1
+
+
+############################Equilibration using NVE ensemble for Temp from 0K to 10K (Langevin dynamics at 10 K)##########
+
+reset_timestep 0
+timestep	0.001
+
+thermo 500
+thermo_style custom step lx ly lz temp press pxx pyy pzz pe ke etotal
+dump 1 all custom 10000 NVE_EQ_10K_*.dump id type x y z vx vy vz c_eng
+dump_modify 1 element Fe Ni Cr Co Cu
+
+
+fix 2 all nve
+fix mom all momentum 100 linear 1 1 1
+
+run 40000
+
+
+undump 1
+unfix 2
+unfix mom
+
+
+
+
+################################## Relaxation at 300K using NPT ensemble for 60ps ###################################
+
+reset_timestep 0
+timestep	0.001
+#velocity all create 1 12345 mom yes rot no
+fix 1 all npt temp 10 10 0.5 x 0 0 2 y 0 0 2 z 0 0 2 
+
+thermo 500
+thermo_style custom step lx ly lz temp  press pxx pyy pzz pe ke etotal
+dump            1 all custom  20000  EQ_NPT_*.dump id type mass x y z vx vy vz c_eng 
+dump_modify     1 element Fe Ni Cr Co Cu
+restart 10000 file.restartnpt
+run 40000
+
+unfix 1
+undump 1 
+
+############################Equilibration using NVE ensemble for 100ps (Langevin dynamics at 300 K)##########
+
+reset_timestep 0
+
+change_box all boundary p p s remap units box
+
+
+fix		2 all nve
+fix 3   all temp/berendsen 10 10 0.1
+thermo_style	custom step lx ly lz  temp  press pxx pyy pzz pe ke etotal
+dump            1 all custom  10000  EQ_NVE_*.dump id type mass x y z vx vy vz c_peratom 
+dump_modify     1 element Fe Ni Cr Co Cu
+thermo          200
+timestep	0.001
+
+restart 10000 file.restartnvt
+
+run	 40000
+undump 1
+unfix 2
+unfix 3
+
+
+#########Calculation of Temprature and pressure of Bins ###############
+
+reset_timestep 0
+
+fix      2 all nve
+thermo   20
+variable meanpress atom -(c_strs[1]+c_strs[2]+c_strs[3])/3/c_vorvol[1]/1e4
+variable        p2 equal "-pxx/10000"
+variable        p3 equal "-pyy/10000"
+variable        p4 equal "-pzz/10000"
+
+variable stressZ atom c_strs[3]/c_vorvol[1]/1e4
+variable shearstress atom -(c_strs[3]-(c_strs[1]+c_strs[2])/2)/2/c_vorvol[1]/1e4
+
+variable tmp equal "lz"
+variable L0 equal ${tmp}
+variable strain equal "(lz - v_L0)/v_L0"
+variable zl equal "zlo"
+variable p1 equal "v_strain"
+
+
+################################### Compute Variation of Atoms ##################################
+
+############################Position of Piston #############################
+
+
+compute partsZ all chunk/atom bin/1d z lower 0.01 units reduced
+
+variable zl equal "zlo"
+variable zpiston equal v_zl
+print "zl = ${zl}"
+print "zpiston = ${zpiston}"
+
+
+fix    rigidWall all wall/reflect zlo EDGE  units box
+
+fix walls all wall/piston zlo pos ${zpiston} vel 12.5  units box
+
+
+compute mytemp2 all temp/partial 1 1 0
+compute         parts all chunk/atom bin/1d z lower 0.01 units reduced
+compute chunkCOM all com/chunk parts
+compute myChunk all vcm/chunk parts
+fix vcom all ave/time 1 10 10 c_myChunk[*] file tmp.out mode vector
+
+
+variable trKE atom mass*(c_velZ)*(c_velZ)/2
+variable temp atom c_ke/(1.5*8.61e-5)
+fix density_prof all ave/chunk 1 10 10 parts density/mass file profile.denz
+fix             ke_prof all ave/chunk 1 10 10 parts c_ke file profile.mpke
+fix             stress_prof all ave/chunk 1 10 10 parts v_stressZ file profile.stress
+fix             meanstr_prof all ave/chunk 1 10 10 parts v_meanpress file profile.meanpress
+
+fix             temp_prof all ave/chunk 1 10 10 parts temp file profile.mptemp
+fix             temp_prof1 all ave/chunk 1 10 10 parts v_temp file profile.mptemp.calc
+fix             vel_prof all ave/chunk 1 10 10 parts c_velZ file profile.VelocityZ
+fix shear_prof all ave/chunk 1 10 10 parts v_shearstress file profile.shear
+
+
+
+timestep   0.001
+thermo_style custom step lx ly lz temp pe etotal v_strain v_p2 v_p3 v_p4 press ke
+
+dump       1 all custom 100 dump.shock.* id type mass x y z c_peratom c_ke v_temp c_velZ 
+dump_modify     1 element Fe Ni Cr Co Cu
+
+restart 1000 file.restartpiston
+
+run  3000
+
+restart 3000 file.restartpistonfree
+
+unfix walls
+
+run  35000
+
