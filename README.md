@@ -7,5 +7,4 @@ MD simulation data and code for shock and spall response of FeCoCrNiCu high-entr
   
 
 ## Data availability
-The complete MD simulation trajectory data are archived on Zenodo:
-https://doi.org/10.5281/zenodo.20444776
+https://github.com/hemanshu-rajput/FeCoCrNiCu-HEA.git
