@@ -1,4 +1,4 @@
-MD simulation data and code for shock and spall response of FeCoCrNiCu high-entropy alloy across five grain-boundary configurations.
+MD simulation data and code for shock and spall response of FeCoCrNiCu high-entropy alloy .
 
 ## Contents
 - LAMMPS input scripts
